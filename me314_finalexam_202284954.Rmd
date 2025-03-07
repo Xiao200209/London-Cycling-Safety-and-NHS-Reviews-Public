@@ -1,0 +1,333 @@
+---
+title: "ME314 2023 Exam"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+## Instructions 
+
+- There are two questions, both worth 50 points each. You should answer **both** questions.  
+
+- Complete the assignment by adding your answers directly to the RMarkdown document, knitting the document, and submitting the HTML file to Moodle.   
+
+- Please **do not** write your substantive interpretations to the questions in your R comments. They must appear in the knitted HTML document in order for them to receive credit.
+
+- Submit the assignment via [Moodle](https://shortcourses.lse.ac.uk/course/view.php?id=158).
+
+- The total word count for this assignment is 1500 words. The word count does not include the code you use to implement the various analyses, but it does include everything else.
+
+- Deadline: Monday 31st July, 6pm
+
+
+\newpage
+
+## Question 1 -- **London Cycling Safety**
+
+For this question, you will use data on 21492 cycling-involved incidents from 2017 to 2020 in London. These data are stored in the `cycling_severity.csv` file. Your goal is to use this data to build a model to predict the severity of traffic accidents. The data contains the following variables
+
+| Variable          | Description|
+|:------------------|:----------------------------------------------------|
+|`severity_numeric`| A measure of the severity of the incident, ranging from 1 (Not serious) to 10 (Very serious)|
+|`severity_binary`| A binary measure of severity (`"Not Severe"` or `"Severe"`)|
+| `date`    | Date of the incident|
+| `weekday`     | Day of the incident|
+| `daytime`     | Time of day of the incident|
+| `season` | Season of the incident|
+| `weather_conditions`     | Weather at time of incident|
+| `light_conditions`     | Light conditions at time of incident|
+|`road_surface_conditions`| Road surface conditions at time of incident|
+|`road_type`| Type of road on which incident occurred|
+|`speed_limit`| Speed limit on road|
+|`number_of_vehicles`| Number of vehicles involved in incident|
+|`urban_or_rural_area`| Did the incident take place in a rural or an urban area?|
+|`IMD_Decile`|Index of Multiple Deprivation Decile of area in which incident occurred. (1 means the most deprived and 10 represents the least deprived).|
+|`IncScore`|Income Score (rate) of area in which incident occurred.|
+|`EmpScore`|Employment Score (rate) of area in which incident occurred.|
+|`HDDScore`|Health Deprivation and Disability Score of area in which incident occurred.|
+|`EduScore`|Education, Skills and Training Score of area in which incident occurred.|
+|`CriScore`|Crime Score of area in which incident occurred.|
+|`EnvScore`|Living Environment Score of area in which incident occurred.|
+: Variables in the `cycling_severity.csv` data.
+
+Once you have downloaded this file and stored it somewhere sensible, you can load it into R using the following command:
+
+```{r, echo = TRUE, eval = TRUE}
+
+cycling <- read.csv("cycling_severity.csv")
+library("tidyverse")
+library(randomForest)
+library(glmnet)
+library(caret)
+```
+
+You will be awarded marks for:
+
+1. Applying your chosen method (15 marks):
+    
+*First Thing I did, was looking at the data set and knew that response is a binary variable, where I can use all types of model including Linear Probability Model.*
+
+*The data set also need to be processed for a tidy version. But it can be messy when we split some variables. For example, if we split `weekday`, there will be 6 more dummy variables against `Monday`. Maybe we can split into `Weekday` and `Weekend` if we really need. But as the plot shown below, `weekday` and `season` have small effect on `severity`, which means we may don't need that variables.*
+```{r}
+
+par(mfrow = c(2,2))
+plot(as.factor(cycling$weekday),cycling$severity_numeric)
+plot(as.factor(cycling$season),cycling$severity_numeric)
+plot(as.factor(cycling$weather_conditions),cycling$severity_numeric)
+plot(as.factor(cycling$road_surface_conditions),cycling$severity_numeric)
+```
+
+*I divided light conditions into 3 levels, `daylight`(the best), `Darkness - lights lit`, `Darkness`(the worst).*
+
+*`Road types` into 3 dummy against `Single Carriageway`.*
+
+*`Weather Conditions` and `Road Surface Conditions` are almost same because when raining there will be wet and when snowing there will be snow and ice. And we created 2 variables according to `Weather Conditions`: `Winds` and `Moist`.*
+
+*In `daytime`, the lightness has been represented by `Light_conditions_rate`, only information left is about Rush Hours, hence we created `Rush`*
+
+```{r}
+cycling <- cycling %>% 
+  mutate(severity_binary_new = ifelse(severity_binary == "Severe", 1, 0)) %>%
+  mutate(urban_or_rural_area_new = ifelse(urban_or_rural_area == "Urban", 1, 0)) %>%
+  mutate(Rd_Dual = ifelse(road_type == "Dual carriageway", 1, 0))%>%
+  mutate(Rd_Roudabout= ifelse(road_type == "Roundabout", 1, 0))%>%
+  mutate(Rd_1waystrt= ifelse(road_type == "One way street", 1, 0))%>%
+  mutate(Rd_Slip= ifelse(road_type == "Slip road", 1, 0))%>%
+  mutate(Light_condtions_rate = ifelse(
+    light_conditions %in% c("Darkness - lights unlit", "Darkness - no lighting","Darkness"), 1,
+  ifelse(light_conditions == "Darkness - lights lit", 2, 3)))%>%
+  mutate(Winds= ifelse(weather_conditions %in% c("Fine + high winds","Raining + high winds","Snowing + high winds" ), 1,0))%>%
+  mutate(Moist= ifelse(weather_conditions %in% c("Snowing no high winds","Raining no high winds","Fog or mist" ,"Raining + high winds" ,"Snowing + high winds"), 1, 0))%>%
+   mutate(Rush=ifelse(daytime %in% c("morning rush (7-10)"  ,"afternoon rush (16-19)"),1,0))
+
+cycling <- cycling[,c("severity_binary_new","speed_limit","number_of_vehicles","IMD_Decile","IncScore","EmpScore","HDDScore","EduScore","CriScore","EnvScore","urban_or_rural_area_new","Rd_Dual","Rd_Roudabout","Rd_1waystrt","Rd_Slip","Light_condtions_rate","Winds","Moist","Rush")]
+```
+
+*Lasso Regression on Linear Probability Model*
+
+*I did lasso because I'm not sure if all variables I created are well-performed to predict. And I did cross-validation to select the best value of hyper parameter - lambda.*
+
+```{r}
+set.seed(1)
+train <-  sample(nrow(cycling), 9/10 * nrow(cycling)) 
+cycling_train <- cycling[train,] 
+cycling_test <- cycling[-train,] 
+```
+```{r}
+x <- as.matrix(cycling_train[, c(-1)])
+x_test<-as.matrix(cycling_test[, c(-1)])
+y <- cycling_train$severity_binary_new
+y_test <- cycling_test$severity_binary_new
+cv_lasso <- cv.glmnet(x, y, alpha = 1)
+lambda_lasso <- cv_lasso$lambda.min
+lasso_model <- glmnet(x, y, alpha = 1, lambda = lambda_lasso)
+predict_lasso <- predict(lasso_model,newx=x_test,type="response")
+predict_lasso <- ifelse(predict_lasso>0.5,1,0)
+# mean(y_test != predict_lasso)
+table_lasso <- table(y_test,predict_lasso)
+```
+
+*Logistical Regression*
+
+```{r}
+logit_model <- glm(severity_binary_new ~ ., data = cycling_train, family = binomial)
+predict_logit <- predict(logit_model,newdata=cycling_test,type = "response")
+predict_logit <- ifelse(predict_logit>0.5,1,0)
+# mean(cycling_test[,1] != predict_logit)
+table_logit<-table(cycling_test$severity_binary_new,predict_logit)
+```
+
+*Random Forest*
+
+```{r}
+cycling_train$severity_binary_new <- as.factor(cycling_train$severity_binary_new)
+rand_forest <-  randomForest(severity_binary_new ~ ., 
+                           data=cycling_train, 
+                           mtry=2)
+predict_rand <-  predict(rand_forest, newdata=cycling_test)
+# mean(predict_rand != cycling_test$severity_binary_new)
+table_rand <- table(predict_rand, cycling_test$severity_binary_new)
+```
+
+2. Demonstrating the predictive performance of your chosen method (15 marks). 
+```{r}
+mat1<-confusionMatrix(table_lasso, severity_binary_new = "TRUE")
+mat2<-confusionMatrix(table_logit, severity_binary_new = "TRUE")
+mat3<-confusionMatrix(table_rand, severity_binary_new = "TRUE")
+combined<-rbind(mat1$byClass,mat2$byClass,mat3$byClass)
+combined<-cbind(combined[,c(1,2)],c(1-0.1237209,1-0.1190698,1-0.1111628))
+colnames(combined) <- c("Sensitivity","Specificity","Accuracy")
+combined
+```
+*As default, we predict individual as positive when it's predicted probability is larger than `0.5`. Under this condition, the accuracy rates are almost same for 3 different models. Random Forest shows significantly better performance in prediction of True Positives than other two models, but it's true negative rate is much lower, only `0.276`*
+
+*Overall, Logit Model shows a good performance in both Sensitivity and Specificity.*
+    
+3. Interpreting the result of your method, commenting on how the results might be informative for people working to reduce the severity of cycling accidents (10 marks).
+```{r}
+summary(logit_model)
+pcafit <- prcomp(cycling[,-1],scale.=TRUE)
+pcafit$rotation[,c(1,2,3)]
+#summary(pcafit)
+```
+*PC1 takes 24% proportion of variance, much higher than other PCs. And it is mostly processed from effects of `IMD_Decile`, `IncScore`, `EmpScore`, `HDDScore`, `EduScore`, `CriScore`*
+
+*But when we look at the p-value of coefficient in Logit Model, variables showing high statistical significant level are totally different. At 95% confidence level, `light conditions`, `Rush`, weather conditions as `Winds` and `Moist`, `Road Type` and `Speed Limit` are influencing the severity of accident. People may need to pay more attention when they are cycling on special road types, in horrible weather, with bad light conditions and so on.*
+
+4. Describing what advantages and/or disadvantages your chosen method has over alternative approaches (10 marks).
+
+*Lasso can do feature selection and shrink coefficient to exact zero. And undertakes regularization at the same time. But it is based on the assumption of linear relationship between features and response.*
+
+*Logit Model has better interpret ability than other two, though it still difficult to interpret. Moreover, Logit shows non-linear change in unit. But it is based on the assumption of Logistical Distribution.*
+
+*Random Forest reduce over-fitting via multiple decision trees and averaging them. But it's computational intensive, and time-consuming for finding hyper paramters and training. Moreover, it can be hard to interpret.*
+
+\newpage
+
+## Question 2 -- **NHS Patient Reviews** -- `nhs_reviews.Rdata`
+
+For this question, you will use a set of 2000 patient reviews of NHS doctors' surgeries across the UK. The data contains the following variables:
+
+| Variable          | Description|
+|:------------------|:----------------------------------------------------|
+| `review_title`    | The title of the patient's review|
+| `review_text`     | The text of the patient's review |
+| `star_rating`     | The star rating (out of five) that the patient gave|
+| `review_positive` | A categorical indicator equal to `"Positive"` if the patient gave 3 stars or more in their review, and `"Negative"` if they gave 1 or 2 stars|
+| `review_date`     | The date of the review|
+| `gp_response`     | A categorical variable which measures whether the doctors' surgery provided a response to the patient's review (`"Responded"`) or has not yet provided a response (`"Has not responded"`) |
+: Variables in the `nhs_reviews` data.
+
+Once you have downloaded this file and stored it somewhere sensible, you can load it into R using the following command:
+
+```{r, echo = TRUE, eval = TRUE}
+
+load("nhs_reviews.Rdata")
+library("quanteda", quietly = TRUE, warn.conflicts = FALSE, verbose = FALSE)
+library(quanteda.textmodels)
+```
+
+Your task is to apply at least one of the text analysis methods that we covered during the course to this data. Your goal in applying these methods is to generate insight for people who work within the NHS and would like to find ways to improve the service offered by GPs. You can select any text analysis method we covered on the course for this purpose. For instance, you might use a topic model, a dictionary-based approach, supervised classification, and so on.
+
+You will be awarded marks for:
+
+1. Applying your chosen method (15 marks). 
+
+*For this analysis of patient reviews of NHS doctors' surgeries, I have chosen to use a supervised text classification approach with the Naive Bayes classifier. Naive Bayes is popular and efficient.*
+
+*I splitted the data into training set and testing set randomly, tokenized corpus, and created document-feature matrix. Then, trained the model on training data set.*
+
+```{r}
+corpus <- corpus(nhs_reviews, text_field = "review_text")
+# head(summary(corpus))
+# head(docvars(corpus))
+# table(docvars(corpus)$review_positive)
+# dim(docvars(corpus))
+set.seed(1)
+train <- sample(c(TRUE, FALSE), 2000, replace = TRUE, prob = c(.75, .25))
+train_corpus <- corpus[train]
+test_corpus <- corpus[!train]
+train_tokens <- tokens(train_corpus, 
+                              remove_punct = TRUE, 
+                              remove_numbers = TRUE, 
+                              remove_symbols = TRUE)
+test_tokens <- tokens(test_corpus, 
+                             remove_punct = TRUE, 
+                             remove_numbers = TRUE, 
+                             remove_symbols = TRUE)
+train_dfm <- dfm(train_tokens) %>%
+  dfm_remove(pattern = stopwords("en")) %>%
+  dfm_trim(min_termfreq = 10)
+test_dfm <- dfm(test_tokens)
+test_dfm <- dfm_match(test_dfm, features = featnames(train_dfm))
+```
+
+```{r}
+naive_model <- textmodel_nb(x = train_dfm, y = train_dfm$review_positive)
+```
+
+
+2. Discussing the feature-selection decisions you make and how they might affect the outcomes of the analysis (10 marks).
+
+Decisions
+
+*In feature-selection, I removed stop words in English, punctuation, symbol and number. I also set a Term Frequency Threshold on texts, and did tokenization on corpus.*
+
+Effects
+
+*1. Accuracy will improve, as we exclude noise and irrelevant features. But it may also lose some information.*
+
+*2. The model and its prediction result can be more understandable.*
+
+*3. Lower the dimension and complexity of feature space, and so save training time and computational resources*
+
+3. Providing some form of validation for your chosen method (15 marks).
+
+*I did prediction on test data set and viewed the result. Here I use confusion_matrix for validation, which provided Criteria for us, such as Confusion Matrix, Accuracy, Sensitivity and Specificity, beneficial to our understanding of prediction performance on both negative comments and positive comments.*
+
+```{r}
+test_predicted_class <- predict(naive_model, newdata = test_dfm)
+confusion_matrix <- table(test_predicted_class, test_dfm$review_positive)
+library(caret)
+confusion_matrix <- confusionMatrix(confusion_matrix, positive = "Positive")
+```
+
+*Confusion matrix compares the true types of comments with predicted results, which is quite straightforward. Accuracy is 0.915. And Sensitivity is 0.902 while Specificity is 0.939 (both are well-performed), showing that this model has better performance in True Negative Prediction. *
+
+```{r}
+print(confusion_matrix$table)
+round(confusion_matrix$overall,3)
+round(confusion_matrix$byClass,3)
+```
+
+
+4. Interpreting the output of the analysis, commenting on how the results might be informative to people working in the NHS (15 marks).
+
+*I list features with highest probability in negative and positive comments separately.*
+
+*In negative comments, people's complain texts include `appointment`, `call` and `surgery` mostly.*
+
+```{r}
+head(sort(naive_model$param["Negative",], decreasing = TRUE), 10)
+negative_reviews <- subset(nhs_reviews, review_positive == "Negative")
+```
+
+*We select text related to `appointment` from corpus. And try to look at this feature in context. The comments show that NHS need to improve their service in `appointment` and `call`. Because, people said it was useless and time-wasting when they tried to call the NHS via phone and online.*
+
+```{r}
+# head(kwic(negative_reviews$review_text, "appointment", 20),3)
+# head(kwic(negative_reviews$review_text, "call", 20),3)
+```
+
+*In positive comments, people are mostly talking about `staff`, `practice` and `surgery`.*
+
+```{r}
+head(sort(naive_model$param["Positive",], decreasing = TRUE), 10)
+positive_reviews <- subset(nhs_reviews, review_positive == "Positive")
+```
+*We selected positive reviews including `staff` and `practice` here. And found out that from clinical staff to the reception and dispensary staff, Teams of NHS show outstanding performance and are welcomed by patients.*
+
+```{r}
+# head(kwic(positive_reviews$review_text, "staff", 20),5)
+# kwic(positive_reviews$review_text, "practice", 20)[20:25,]
+```
+
+*Overall, the output of naive bayes model shows valuable information for staff in NHS. For example, they may need to extend the capacity of telephone line and hire more receptionists, saving patients waiting time in queue. Moreover, they can maintain their high professional standard and ethic.*
+
+5. Critically assessing the strengths and weaknesses of your selected approach and proposing  at least one alternative text analysis strategy that might be used in the selected application (10 marks).
+
+*Naive Bayes*
+
+*Advantage: Naive Bayes is efficient when doing text analysis. And it is easy to understand and can be interpretable.* 
+
+*Disadvantage: The assumption of independence between features may not hold true in real-word text data. And it is unable to account for interaction between words. In some contexts, it can be overconfident and decrease predictive accuracy.*
+
+
+*Wordscore*
+
+*Wordscore can be the alternative text analysis trategy here. Instead of relying on simple word counts as in Naive Bayes, wordscore assigns scores to words based on their association with positive or negative sentiment. The model and then uses these scores on words to predict the sentiment of the entire text.*
+
+*Advantage: We can flexibly choose scores for words, based on the context of sentiment. For example, "happiness" is milder than `ecstasy`. Furthermore, it is better to use the wordscores approach when we want to scale actors instead of classifying them.*
+
+*Disadvantage: the score on words is subjective, requiring domain knowledge or sensitivity on lexicons. And it can be complicated, as we assign scores on tons of words.*
+
